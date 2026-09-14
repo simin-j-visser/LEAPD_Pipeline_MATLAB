@@ -1,0 +1,15 @@
+# Data and generated results
+data/*.mat
+data/*.xlsx
+data/*.xls
+results/*
+!results/.gitkeep
+
+# MATLAB temporary/autosave files
+*.asv
+*.m~
+*.autosave
+
+# OS files
+.DS_Store
+Thumbs.db
