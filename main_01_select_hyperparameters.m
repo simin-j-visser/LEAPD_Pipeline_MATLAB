@@ -58,6 +58,10 @@ config.useNormalizedProjection = false;
 % Parallelize across channels.
 config.useParallelChannels = true;
 
+% Progress settings.
+config.showWaitbar = false;
+config.progressBandInterval = 500;
+
 % Default: retain all channels.
 config.excludedChannels = {};
 

@@ -1,18 +1,23 @@
 function bestRow = ...
-    search_one_channel(dataset, channelName, context, config)
+    search_one_channel(dataset, channelName, context, config, progressQueue)
 %SEARCH_ONE_CHANNEL Fast exhaustive hyperparameter search for one channel.
 %
 % Only the winning parameter set is retained. Subject-level LEAPD scores
 % are computed once after the winning hyperparameters are known.
 
+    if nargin < 5
+        progressQueue = [];
+    end
+
     switch lower(config.analysisType)
+
         case 'binary'
             bestRow = search_binary_channel( ...
-                dataset, channelName, context, config);
+                dataset, channelName, context, config, progressQueue);
 
         case 'correlation'
             bestRow = search_correlation_channel( ...
-                dataset, channelName, context, config);
+                dataset, channelName, context, config, progressQueue);
 
         otherwise
             error('Unknown analysisType: "%s".', config.analysisType);
@@ -21,7 +26,7 @@ end
 
 
 function bestRow = search_binary_channel( ...
-    dataset, channelName, context, config)
+    dataset, channelName, context, config, progressQueue)
 
     [signals, classes, subjectIDs] = ...
         get_binary_channel_data(dataset, channelName);
@@ -32,7 +37,11 @@ function bestRow = search_binary_channel( ...
             channelName);
     end
 
-    preparedSignals = prepare_channel_signals(signals);
+    preparedSignals = prepare_channel_signals( ...
+        signals, ...
+        config.samplingRate, ...
+        config.notchFrequencyHz, ...
+        config.notchQualityFactor);
 
     bestAccuracy = -inf;
     bestLow = NaN;
@@ -42,8 +51,10 @@ function bestRow = search_binary_channel( ...
     bestFeatures = [];
 
     validBands = context.validBands;
+    nBands = size(validBands,1);
 
-    for bandIndex = 1:size(validBands,1)
+    for bandIndex = 1:nBands
+
         low = validBands(bandIndex,1);
         high = validBands(bandIndex,2);
 
@@ -56,6 +67,7 @@ function bestRow = search_binary_channel( ...
             filtered, config.lpcOrders);
 
         for orderIndex = 1:numel(config.lpcOrders)
+
             order = config.lpcOrders(orderIndex);
             features = featuresByOrder{orderIndex};
 
@@ -75,8 +87,6 @@ function bestRow = search_binary_channel( ...
 
             [currentAccuracy, currentDimension] = max(accuracies);
 
-            % Accuracy is the ONLY binary model-selection criterion.
-            % Ties retain the first encountered parameter combination.
             if currentAccuracy > bestAccuracy
                 bestAccuracy = currentAccuracy;
                 bestLow = low;
@@ -86,6 +96,8 @@ function bestRow = search_binary_channel( ...
                 bestFeatures = features;
             end
         end
+
+        send_band_progress(progressQueue, bandIndex, nBands, config);
     end
 
     if isempty(bestFeatures) || ~isfinite(bestAccuracy)
@@ -93,8 +105,6 @@ function bestRow = search_binary_channel( ...
                'for channel %s.'], channelName);
     end
 
-    % Re-run ONLY the winning model with the standard CV function to obtain
-    % subject-level out-of-fold LEAPD scores and predictions.
     finalCV = cross_validate_binary_leapd( ...
         bestFeatures, ...
         classes, ...
@@ -136,7 +146,7 @@ end
 
 
 function bestRow = search_correlation_channel( ...
-    dataset, channelName, context, config)
+    dataset, channelName, context, config, progressQueue)
 
     channelData = get_channel_data(dataset, channelName);
 
@@ -158,7 +168,11 @@ function bestRow = search_correlation_channel( ...
         channelData.group1Signals; ...
         channelData.group0Signals];
 
-    preparedSignals = prepare_channel_signals(allSignals);
+    preparedSignals = prepare_channel_signals( ...
+        allSignals, ...
+        config.samplingRate, ...
+        config.notchFrequencyHz, ...
+        config.notchQualityFactor);
 
     bestRho = NaN;
     bestLow = NaN;
@@ -168,8 +182,10 @@ function bestRow = search_correlation_channel( ...
     bestFeatures = [];
 
     validBands = context.validBands;
+    nBands = size(validBands,1);
 
-    for bandIndex = 1:size(validBands,1)
+    for bandIndex = 1:nBands
+
         low = validBands(bandIndex,1);
         high = validBands(bandIndex,2);
 
@@ -182,6 +198,7 @@ function bestRow = search_correlation_channel( ...
             filtered, config.lpcOrders);
 
         for orderIndex = 1:numel(config.lpcOrders)
+
             order = config.lpcOrders(orderIndex);
             features = featuresByOrder{orderIndex};
 
@@ -216,6 +233,8 @@ function bestRow = search_correlation_channel( ...
                 bestFeatures = features;
             end
         end
+
+        send_band_progress(progressQueue, bandIndex, nBands, config);
     end
 
     if isempty(bestFeatures) || ~isfinite(bestRho)
@@ -226,9 +245,6 @@ function bestRow = search_correlation_channel( ...
     targetFeatures = bestFeatures(1:nTarget,:);
     referenceFeatures = bestFeatures(nTarget+1:end,:);
 
-    % Re-run ONLY the winning model to store exact subject-level OOF scores
-    % and the associated Spearman p-value. If numberOfFolds = 1 these are
-    % specifically LOOCV scores.
     finalResult = evaluate_correlation_leapd( ...
         targetFeatures, ...
         referenceFeatures, ...
@@ -269,6 +285,35 @@ function bestRow = search_correlation_channel( ...
 end
 
 
+function send_band_progress(progressQueue, bandIndex, nBands, config)
+%SEND_BAND_PROGRESS Send progress update from worker to client.
+
+    if isempty(progressQueue)
+        return;
+    end
+
+    if ~isfield(config, 'progressBandInterval') || ...
+            isempty(config.progressBandInterval)
+        progressBandInterval = 500;
+    else
+        progressBandInterval = config.progressBandInterval;
+    end
+
+    if mod(bandIndex, progressBandInterval) == 0
+        send(progressQueue, progressBandInterval);
+
+    elseif bandIndex == nBands
+        remainder = mod(nBands, progressBandInterval);
+
+        if remainder == 0
+            remainder = progressBandInterval;
+        end
+
+        send(progressQueue, remainder);
+    end
+end
+
+
 function [bestRho, bestDimension] = ...
     select_best_rho(rhos, criterion)
 
@@ -287,6 +332,7 @@ end
 
 
 function tf = is_better_rho(candidate, currentBest, criterion)
+
     if ~isfinite(candidate)
         tf = false;
         return;

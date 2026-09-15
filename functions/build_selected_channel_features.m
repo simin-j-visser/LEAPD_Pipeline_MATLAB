@@ -1,0 +1,63 @@
+function channelFeatures = build_selected_channel_features( ...
+    dataset, selectedModels, samplingRate, ...
+    notchFrequencyHz, notchQualityFactor)
+%BUILD_SELECTED_CHANNEL_FEATURES Extract fixed LPC features for selected channels.
+%
+% This function is used for out-of-sample evaluation after channel-specific
+% hyperparameters have already been selected on the development dataset.
+%
+% The preprocessing order matches the optimized training pipeline:
+%   1. Normalize each segment independently to unit energy.
+%   2. Average segments.
+%   3. Apply the line-noise notch filter.
+%   4. Apply the selected Butterworth band-pass filter.
+%   5. Normalize the final signal to unit energy.
+
+    nChannels = height(selectedModels);
+    channelFeatures = cell(nChannels,1);
+
+    referenceIDs = [];
+    referenceClasses = [];
+
+    for ch = 1:nChannels
+
+        channelName = selectedModels.Channel{ch};
+
+        [signals, classes, subjectIDs] = ...
+            get_binary_channel_data( ...
+                dataset, ...
+                channelName);
+
+        if ch == 1
+
+            referenceIDs = subjectIDs;
+            referenceClasses = classes;
+
+        elseif ~isequal(subjectIDs(:), referenceIDs(:)) || ...
+                ~isequal(classes(:), referenceClasses(:))
+
+            error('Subject identity/order differs across selected channels.');
+        end
+
+        preparedSignals = prepare_channel_signals( ...
+            signals, ...
+            samplingRate, ...
+            notchFrequencyHz, ...
+            notchQualityFactor);
+
+        filterBank = build_filter_bank( ...
+            [selectedModels.LowCutoffHz(ch), ...
+             selectedModels.HighCutoffHz(ch)], ...
+            samplingRate);
+
+        filtered = filter_prepared_channel_signals( ...
+            preparedSignals, ...
+            filterBank, ...
+            1);
+
+        channelFeatures{ch} = ...
+            extract_lpc_features( ...
+                filtered, ...
+                selectedModels.LPCOrder(ch));
+    end
+end

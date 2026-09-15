@@ -3,16 +3,16 @@ function accuracies = cross_validate_binary_leapd_fast( ...
     useNormalizedProjection)
 %CROSS_VALIDATE_BINARY_LEAPD_FAST Fast binary LEAPD CV for search.
 %
-% PCA dimensions 1:maxDimension are evaluated in one CV pass. For each
-% fold, the class-1 and class-0 SVDs are each computed only once.
+% Vectorized version:
+%   - SVD is computed once per class per fold.
+%   - Projection onto all PCA dimensions is computed once.
+%   - Distances for dimensions 1:maxDimension are obtained using
+%     cumulative projection energy.
 %
-% LEAPD convention used throughout this pipeline:
+% LEAPD convention:
 %   score = distance-to-class-0 / (distance1 + distance0)
 %   higher score = more class-1-like
 %   score > 0.5 predicts class 1
-%
-% Output:
-%   accuracies(d) = cross-validated accuracy (%) for dimension d.
 
     features = double(features);
     classes = classes(:);
@@ -29,15 +29,21 @@ function accuracies = cross_validate_binary_leapd_fast( ...
         error('maxDimension must be at least 1.');
     end
 
+    if maxDimension > nFeatures
+        error('maxDimension cannot exceed the number of features.');
+    end
+
     correctCounts = zeros(maxDimension,1);
     totalPredictions = 0;
 
     for fold = 1:nFolds
+
         trainIndex = foldCache.train{fold};
-        testIndex = foldCache.test{fold};
+        testIndex  = foldCache.test{fold};
 
         XTrain = features(trainIndex,:);
         yTrain = classes(trainIndex);
+
         XTest = features(testIndex,:);
         yTest = classes(testIndex);
 
@@ -60,66 +66,70 @@ function accuracies = cross_validate_binary_leapd_fast( ...
                 maxDimension, fold, foldMaximumDimension);
         end
 
-        %% Fit each class subspace ONCE for this fold
         mean1 = mean(class1, 1);
         centeredTrain1 = class1 - mean1;
         [~,~,V1] = svd(centeredTrain1, 'econ');
+        V1 = V1(:,1:maxDimension);
 
         mean0 = mean(class0, 1);
         centeredTrain0 = class0 - mean0;
         [~,~,V0] = svd(centeredTrain0, 'econ');
-
-        V1 = V1(:,1:maxDimension);
         V0 = V0(:,1:maxDimension);
 
         centeredTest1 = XTest - mean1;
         centeredTest0 = XTest - mean0;
 
-        %% Reuse those SVDs for every PCA dimension
-        for pcaDimension = 1:maxDimension
-            basis1 = V1(:,1:pcaDimension);
-            basis0 = V0(:,1:pcaDimension);
+        projection1 = centeredTest1 * V1;
+        projection0 = centeredTest0 * V0;
 
-            if useNormalizedProjection
-                projection1 = centeredTest1 * basis1;
-                projection0 = centeredTest0 * basis0;
+        cumulativeProjectionEnergy1 = cumsum(projection1.^2, 2);
+        cumulativeProjectionEnergy0 = cumsum(projection0.^2, 2);
 
-                numerator1 = sqrt(sum(projection1.^2, 2));
-                numerator0 = sqrt(sum(projection0.^2, 2));
+        if useNormalizedProjection
 
-                denominator1 = sqrt(sum(centeredTest1.^2, 2));
-                denominator0 = sqrt(sum(centeredTest0.^2, 2));
+            denominator1 = sqrt(sum(centeredTest1.^2, 2));
+            denominator0 = sqrt(sum(centeredTest0.^2, 2));
 
-                distance1 = zeros(size(numerator1));
-                distance0 = zeros(size(numerator0));
+            distance1 = zeros(size(cumulativeProjectionEnergy1));
+            distance0 = zeros(size(cumulativeProjectionEnergy0));
 
-                valid1 = denominator1 ~= 0;
-                valid0 = denominator0 ~= 0;
+            valid1 = denominator1 ~= 0;
+            valid0 = denominator0 ~= 0;
 
-                distance1(valid1) = ...
-                    numerator1(valid1) ./ denominator1(valid1);
-                distance0(valid0) = ...
-                    numerator0(valid0) ./ denominator0(valid0);
-            else
-                residual1 = centeredTest1 - ...
-                    (centeredTest1 * basis1) * basis1';
+            distance1(valid1,:) = ...
+                sqrt(cumulativeProjectionEnergy1(valid1,:)) ./ ...
+                denominator1(valid1);
 
-                residual0 = centeredTest0 - ...
-                    (centeredTest0 * basis0) * basis0';
+            distance0(valid0,:) = ...
+                sqrt(cumulativeProjectionEnergy0(valid0,:)) ./ ...
+                denominator0(valid0);
 
-                distance1 = sqrt(sum(residual1.^2, 2));
-                distance0 = sqrt(sum(residual0.^2, 2));
-            end
+        else
 
-            denominator = distance1 + distance0;
-            denominator(denominator == 0) = eps;
-            scores = distance0 ./ denominator;
-            predictions = double(scores > 0.5);
+            totalEnergy1 = sum(centeredTest1.^2, 2);
+            totalEnergy0 = sum(centeredTest0.^2, 2);
 
-            correctCounts(pcaDimension) = ...
-                correctCounts(pcaDimension) + ...
-                sum(predictions == yTest);
+            residualEnergy1 = ...
+                totalEnergy1 - cumulativeProjectionEnergy1;
+
+            residualEnergy0 = ...
+                totalEnergy0 - cumulativeProjectionEnergy0;
+
+            residualEnergy1 = max(residualEnergy1, 0);
+            residualEnergy0 = max(residualEnergy0, 0);
+
+            distance1 = sqrt(residualEnergy1);
+            distance0 = sqrt(residualEnergy0);
         end
+
+        denominator = distance1 + distance0;
+        denominator(denominator == 0) = eps;
+
+        scores = distance0 ./ denominator;
+        predictions = double(scores > 0.5);
+
+        correctCounts = correctCounts + ...
+            sum(predictions == yTest, 1)';
 
         totalPredictions = totalPredictions + numel(yTest);
     end
